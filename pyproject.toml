@@ -1,0 +1,11 @@
+[project]
+name = "chm-help-skill"
+version = "0.1.0"
+description = "Convert CHM help files into Markdown skill folders"
+requires-python = ">=3.15"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+
+[tool.uv]
+package = false
