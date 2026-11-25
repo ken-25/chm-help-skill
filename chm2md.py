@@ -367,19 +367,52 @@ def _same(a: str, b: str) -> bool:
     return n(a) == n(b)
 
 
+def _check_out(out: Path, fmt: str) -> None:
+    """Refuse to write into a folder this tool did not create, or into the
+    other format's folder (both formats rebuild OUT/pages)."""
+    if not out.exists() or not any(out.iterdir()):
+        return
+    idx = out / "index.html"
+    is_html = idx.exists() and GENERATED_MARK in idx.read_text(encoding="utf-8-sig",
+                                                               errors="replace")
+    # HTML output also writes index.md, so index.md alone means Markdown only without it
+    is_md = (out / "SKILL.md").exists() or ((out / "index.md").exists() and not is_html)
+    if fmt == "html" and is_md:
+        raise SystemExit(f"{out} holds a Markdown skill; write HTML to another folder")
+    if fmt == "md" and is_html:
+        raise SystemExit(f"{out} holds HTML output; write Markdown to another folder")
+    if not (is_md or is_html or (out / "SOURCE.md").exists()):
+        raise SystemExit(f"{out} is not empty and was not created by this tool")
+
+
 def build(chm: Path, out: Path, name: str, title: str, with_images: bool,
-          class_map: dict, keep_work: bool = False) -> dict:
+          class_map: dict, keep_work: bool = False, fmt: str = "md") -> dict:
     out = out.resolve()
-    if out.exists() and any(out.iterdir()) and not (out / "SOURCE.md").exists():
-        if not (out / "SKILL.md").exists():
-            raise SystemExit(f"{out} is not empty and was not created by this tool")
+    _check_out(out, fmt)
     work = Path(tempfile.mkdtemp(prefix="chm2md-"))
     try:
         raw = decompile(chm, work)
-        return _build_from_raw(chm, raw, out, name, title, with_images, class_map)
+        return _build(chm, raw, out, name, title, with_images, class_map, fmt, chm.name)
     finally:
         if not keep_work:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def build_from_dir(src: Path, out: Path, name: str, title: str, with_images: bool,
+                   class_map: dict, fmt: str = "md") -> dict:
+    """Same as build() for help pages that are already plain files on disk."""
+    out = out.resolve()
+    _check_out(out, fmt)
+    return _build(src, src.resolve(), out, name, title, with_images, class_map, fmt, None)
+
+
+def _build(source, raw, out, name, title, with_images, class_map, fmt, own_chm) -> dict:
+    if fmt == "html":
+        import chm2html  # noqa: PLC0415  (keeps the Markdown path free of it)
+        stats = chm2html.write_html(load_help(raw), out, title, own_chm)
+        _write_source(source, out, stats, chm2html.summary(stats))
+        return stats
+    return _build_from_raw(source, raw, out, name, title, with_images, class_map)
 
 
 def _index_files(raw: Path) -> tuple[dict[str, Path], dict[str, Path]]:
@@ -396,38 +429,53 @@ def _index_files(raw: Path) -> tuple[dict[str, Path], dict[str, Path]]:
     return pages, images
 
 
-def _build_from_raw(chm, raw, out, name, title, with_images, class_map) -> dict:
-    pages, images = _index_files(raw)
-    hhc = next(iter(sorted(raw.rglob("*.hhc"))), None)
-    hhk = next(iter(sorted(raw.rglob("*.hhk"))), None)
-    toc = parse_sitemap(read_text(hhc)) if hhc else {"children": []}
-    kw = parse_sitemap(read_text(hhk)) if hhk else {"children": []}
-    # .hhc paths are relative to the .hhc location
-    hhc_dir = hhc.parent.relative_to(raw).as_posix() if hhc else ""
-    hhk_dir = hhk.parent.relative_to(raw).as_posix() if hhk else ""
+class HelpData:
+    """What both output formats need from a decompiled help folder."""
 
-    def resolve(local: str, base_dir: str) -> str | None:
+    def __init__(self, raw: Path):
+        self.raw = raw
+        self.pages, self.images = _index_files(raw)
+        self.files = {p.relative_to(raw).as_posix().lower(): p
+                      for p in raw.rglob("*") if p.is_file()}
+        hhc = next(iter(sorted(raw.rglob("*.hhc"))), None)
+        hhk = next(iter(sorted(raw.rglob("*.hhk"))), None)
+        self.toc = parse_sitemap(read_text(hhc)) if hhc else {"children": []}
+        self.kw = parse_sitemap(read_text(hhk)) if hhk else {"children": []}
+        # .hhc paths are relative to the .hhc location
+        self.hhc_dir = hhc.parent.relative_to(raw).as_posix() if hhc else ""
+        self.hhk_dir = hhk.parent.relative_to(raw).as_posix() if hhk else ""
+        # breadcrumbs: page -> first TOC path that reaches it
+        self.crumbs: dict[str, list[str]] = {}
+        self._walk(self.toc, [])
+
+    def resolve(self, local: str, base_dir: str) -> str | None:
         key = norm_local(local)
         if not key:
             return None
         for cand in (posixpath.normpath(posixpath.join(base_dir, key)), key):
-            if cand.lower() in pages:
-                return pages[cand.lower()].relative_to(raw).as_posix()
+            if cand.lower() in self.pages:
+                return self.pages[cand.lower()].relative_to(self.raw).as_posix()
         return None
 
-    # breadcrumbs: page -> first TOC path that reaches it
-    crumbs: dict[str, list[str]] = {}
-
-    def walk(node, trail):
+    def _walk(self, node, trail):
         for ch in node["children"]:
             path = trail + [ch["name"]]
             for loc in ch["locals"]:
-                rel = resolve(loc, hhc_dir)
+                rel = self.resolve(loc, self.hhc_dir)
                 if rel:
-                    crumbs.setdefault(rel, path)
-            walk(ch, path)
+                    self.crumbs.setdefault(rel, path)
+            self._walk(ch, path)
 
-    walk(toc, [])
+
+def load_help(raw: Path) -> HelpData:
+    return HelpData(raw)
+
+
+def _build_from_raw(chm, raw, out, name, title, with_images, class_map) -> dict:
+    data = load_help(raw)
+    pages, images = data.pages, data.images
+    toc, kw, hhc_dir, hhk_dir = data.toc, data.kw, data.hhc_dir, data.hhk_dir
+    resolve, crumbs = data.resolve, data.crumbs
 
     pages_dir = out / "pages"
     if pages_dir.exists():
@@ -553,19 +601,34 @@ def _converter_commit() -> str:
         return "unknown"
 
 
-def _write_source(chm: Path, out: Path, stats: dict) -> None:
-    st = chm.stat()
-    sha = hashlib.sha256(chm.read_bytes()).hexdigest()
-    mtime = _dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+def _write_source(chm: Path, out: Path, stats: dict, summary: str | None = None) -> None:
+    if chm.is_dir():
+        files = sorted(p for p in chm.rglob("*") if p.is_file())
+        h = hashlib.sha256()
+        for p in files:  # path + content, so a rename also changes the hash
+            h.update(p.relative_to(chm).as_posix().encode("utf-8") + b"\0")
+            h.update(p.read_bytes())
+        newest = max((p.stat().st_mtime for p in files), default=chm.stat().st_mtime)
+        mtime = _dt.datetime.fromtimestamp(newest).strftime("%Y-%m-%d %H:%M")
+        size_line = (f"- ファイル数: {len(files)} / 合計 {sum(p.stat().st_size for p in files):,}"
+                     f" bytes / 最終更新: {mtime}")
+        sha_line = f"- SHA-256(相対パスと内容の連結): `{h.hexdigest()}`"
+        src_line = f"- 元フォルダ: `{chm}`"
+    else:
+        st = chm.stat()
+        mtime = _dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+        size_line = f"- サイズ: {st.st_size:,} bytes / 更新日時: {mtime}"
+        sha_line = f"- SHA-256: `{hashlib.sha256(chm.read_bytes()).hexdigest()}`"
+        src_line = f"- 元ファイル: `{chm}`"
+    if summary is None:
+        summary = (f"- ページ数: {stats['pages']}(目次に載るもの {stats['toc_pages']})"
+                   f" / 索引語: {stats['keywords']} / 画像: {stats['images_copied']}")
     lines = [
         GENERATED_MARK, "# 出典", "",
-        f"- 元ファイル: `{chm}`",
-        f"- サイズ: {st.st_size:,} bytes / 更新日時: {mtime}",
-        f"- SHA-256: `{sha}`",
+        src_line, size_line, sha_line,
         f"- 変換: chm-help-skill {VERSION} ({_converter_commit()})",
         f"- 変換日: {_dt.date.today().isoformat()}",
-        f"- ページ数: {stats['pages']}(目次に載るもの {stats['toc_pages']})"
-        f" / 索引語: {stats['keywords']} / 画像: {stats['images_copied']}",
+        summary,
     ]
     (out / "SOURCE.md").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
@@ -581,24 +644,58 @@ def _write_skill(out: Path, name: str, title: str, chm: Path, stats: dict, has_k
                    encoding="utf-8", newline="\n")
 
 
+def downloads_dir() -> Path:
+    """The user's Downloads folder, following a relocation done in Explorer."""
+    try:
+        import winreg  # noqa: PLC0415  (Windows only)
+        key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            value, _ = winreg.QueryValueEx(k, "{374DE290-123F-4565-9164-39C4925E467B}")
+        import os  # noqa: PLC0415
+        return Path(os.path.expandvars(value))
+    except (ImportError, OSError):
+        return Path.home() / "Downloads"
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Convert a CHM help file into a Markdown skill folder")
-    ap.add_argument("--chm", required=True, type=Path)
-    ap.add_argument("--out", required=True, type=Path, help="skill folder to write")
-    ap.add_argument("--name", required=True, help="skill name, e.g. example-help")
-    ap.add_argument("--title", required=True, help="software name used in SKILL.md")
-    ap.add_argument("--with-images", action="store_true", help="copy images referenced by pages")
-    ap.add_argument("--class-map", type=Path, help="JSON file merged over the CSS class map")
+    ap = argparse.ArgumentParser(
+        description="Convert CHM help into a Markdown skill folder or self-contained HTML pages")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--chm", type=Path, help="CHM file to convert")
+    src.add_argument("--src-dir", type=Path, help="folder of plain help pages (not a CHM)")
+    ap.add_argument("--out", type=Path,
+                    help="folder to write (default: Downloads\\<CHM or folder name>-<format>)")
+    ap.add_argument("--format", choices=("md", "html"), default="md",
+                    help="md = Markdown skill folder (default), html = one self-contained "
+                         "HTML file per page (UTF-8 with BOM)")
+    ap.add_argument("--name", help="skill name, e.g. example-help (required for md)")
+    ap.add_argument("--title", required=True, help="software name")
+    ap.add_argument("--with-images", action="store_true",
+                    help="md: copy images referenced by pages (html always embeds them)")
+    ap.add_argument("--class-map", type=Path, help="md: JSON file merged over the CSS class map")
     ap.add_argument("--keep-work", action="store_true", help="keep the decompiled files")
     args = ap.parse_args(argv)
-    if not args.chm.is_file():
+    if args.chm and not args.chm.is_file():
         ap.error(f"not found: {args.chm}")
+    if args.src_dir and not args.src_dir.is_dir():
+        ap.error(f"not found: {args.src_dir}")
+    if args.format == "md" and not args.name:
+        ap.error("--name is required for --format md")
     cmap = dict(DEFAULT_CLASS_MAP)
     if args.class_map:
         cmap.update(json.loads(args.class_map.read_text(encoding="utf-8")))
+    if args.out is None:
+        stem = args.chm.stem if args.chm else args.src_dir.resolve().name
+        args.out = downloads_dir() / f"{stem}-{args.format}"
     args.out.mkdir(parents=True, exist_ok=True)
-    stats = build(args.chm, args.out, args.name, args.title, args.with_images, cmap, args.keep_work)
-    sys.stdout.reconfigure(encoding="utf-8")
+    if args.chm:
+        stats = build(args.chm, args.out, args.name, args.title, args.with_images, cmap,
+                      args.keep_work, args.format)
+    else:
+        stats = build_from_dir(args.src_dir, args.out, args.name, args.title,
+                               args.with_images, cmap, args.format)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps({"out": str(args.out.resolve()), **stats}, ensure_ascii=False))
     return 0
 
