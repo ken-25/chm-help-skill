@@ -34,7 +34,7 @@ python chm2md.py --chm "C:\Program Files\Example\Help\example.chm" `
 |---|---|
 | `--chm` | 変換する CHM ファイル。`--src-dir` とどちらか一方が必須 |
 | `--src-dir` | CHM ではなく、HTML のままフォルダに置かれたヘルプページを変換する |
-| `--out` | 出力先のフォルダ(必須) |
+| `--out` | 出力先のフォルダ。省略するとユーザーのダウンロードフォルダの `<CHM名またはフォルダ名>-<形式>`(例: `Base-html`) |
 | `--format` | `md`(既定。Markdown スキルフォルダ)か `html`(1 ページ 1 ファイルの HTML) |
 | `--name` | スキル名。`SKILL.md` の `name` になる(`md` のとき必須) |
 | `--title` | ソフトウェア名。`SKILL.md` の説明文や目次の見出しに使う(必須) |

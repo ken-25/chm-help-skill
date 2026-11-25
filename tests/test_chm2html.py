@@ -1,4 +1,6 @@
 import base64
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -137,6 +139,65 @@ class HtmlTest(unittest.TestCase):
         self.assertEqual(names["Base/Main/a.html"], "Base/Main/a.html")
         self.assertEqual(names["Base/Main/a.htm"], "Base/Main/a_htm.html")
         self.assertEqual(len({n.lower() for n in names.values()}), len(names))
+
+
+class RewriteTest(unittest.TestCase):
+    """Single-page cases from the review of PR #1."""
+
+    def convert(self, files: dict[str, bytes], rel: str = "a.htm") -> str:
+        with tempfile.TemporaryDirectory() as d:
+            raw = Path(d)
+            for name, body in files.items():
+                (raw / name).parent.mkdir(parents=True, exist_ok=True)
+                (raw / name).write_bytes(body)
+            data = chm2md.load_help(raw)
+            names = chm2html.page_names(data)
+            return chm2html.convert_page(rel, chm2html.Resources(data, "x.chm"), names, "<nav/>")
+
+    def test_bare_ampersand_kept(self):
+        out = self.convert({"a.htm": "<body><p>R&D, A&B=1, &copy; &lt;x&gt;</p></body>".encode()})
+        self.assertIn("<p>R&amp;D, A&amp;B=1, © &lt;x&gt;</p>", out)
+
+    def test_name_with_hash_and_space(self):
+        out = self.convert({"a.htm": b'<body><a href="sub/my%20page%23.htm#z">x</a></body>',
+                            "sub/my page#.htm": b"<title>t</title>"})
+        self.assertIn('<a href="sub/my%20page%23.html#z">x</a>', out)
+
+    def test_unclosed_dropped_element_stops_at_body(self):
+        out = self.convert({"a.htm": b"<body><p>a</p><object><param name=x><p>b</p></body>"})
+        self.assertIn("<p>a</p>", out)
+        self.assertTrue(out.rstrip().endswith("</body>"))
+
+    def test_charset_and_nav_after_html_when_no_head(self):
+        out = self.convert({"a.htm": b"<!DOCTYPE html><html><p>x</p></html>"})
+        self.assertTrue(out.startswith('<!DOCTYPE html><html>\n<meta charset="utf-8">\n<nav/>'))
+
+    def test_css_import_and_fonts_inlined(self):
+        out = self.convert({
+            "a.htm": b'<head><link rel="stylesheet" href="m.css"></head><body></body>',
+            "m.css": b'@import url("t.css");\n@import "m.css";\np{color:red}',
+            "t.css": b"@font-face{src:url(f.woff)}",
+            "f.woff": b"wOFF"})
+        self.assertNotIn("@import", out)
+        self.assertIn('src:url("data:font/woff;base64,', out)
+        self.assertIn("p{color:red}", out)
+
+
+class DefaultOutTest(unittest.TestCase):
+    def test_out_defaults_to_downloads(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "Help_X"
+            src.mkdir()
+            (src / "a.htm").write_bytes(b"<title>a</title>")
+            dl = Path(d) / "DL"
+            orig = chm2md.downloads_dir
+            chm2md.downloads_dir = lambda: dl
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    chm2md.main(["--src-dir", str(src), "--format", "html", "--title", "X"])
+            finally:
+                chm2md.downloads_dir = orig
+            self.assertTrue((dl / "Help_X-html" / "pages" / "a.html").exists())
 
 
 if __name__ == "__main__":

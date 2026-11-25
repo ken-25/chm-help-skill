@@ -21,7 +21,7 @@ import re
 import shutil
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import chm2md
 
@@ -29,9 +29,14 @@ ENCODING = "utf-8-sig"  # UTF-8 with BOM
 MIME = {
     ".png": "image/png", ".gif": "image/gif", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".bmp": "image/bmp", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".webp": "image/webp",
+    ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
+    ".eot": "application/vnd.ms-fontobject",
 }
-DROP_TAGS = {"script", "object", "applet", "embed", "noscript", "base"}
+# frames would load another file, so they go too (help pages rarely use them)
+DROP_TAGS = {"script", "object", "applet", "embed", "noscript", "base",
+             "iframe", "frame", "frameset"}
 URL_IN_CSS = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""", re.I)
+CSS_IMPORT = re.compile(r"""@import\s+(?:url\(\s*)?(['"]?)([^'")\s;]+)\1\s*\)?[^;]*;""", re.I)
 INDEX_CSS = (
     "body{font-family:'Meiryo UI','Yu Gothic UI',sans-serif;background:#fff;color:#222;"
     "margin:24px;line-height:1.6}"
@@ -55,18 +60,18 @@ class Resources:
 
     def find(self, ref: str, base_dir: str) -> str | None:
         """Resolve a reference from a page/stylesheet to a raw-folder key."""
-        r = unquote(ref.strip().replace("\\", "/"))
+        # cut "#anchor" / "?query" before decoding, so "%23" in a name stays part of it
+        r = ref.strip().replace("\\", "/").split("#", 1)[0].split("?", 1)[0]
         if "::" in r:
             chm, _, inner = r.partition("::")
             chm = re.sub(r"(?i)^(ms-its|mk:@msitstore|its):", "", chm)
-            if posixpath.basename(chm.replace("\\", "/")).lower() != self.own_chm:
+            if posixpath.basename(unquote(chm)).lower() != self.own_chm:
                 return None  # another CHM: not part of this conversion
-            key = posixpath.normpath(inner.lstrip("/"))
+            key = posixpath.normpath(unquote(inner).lstrip("/"))
         else:
-            r = r.split("#", 1)[0].split("?", 1)[0]
             if not r or re.match(r"(?i)^[a-z][a-z0-9+.-]*:", r):
                 return None
-            key = posixpath.normpath(posixpath.join(base_dir, r))
+            key = posixpath.normpath(posixpath.join(base_dir, unquote(r)))
         key = key.lower()
         return key if key in self.data.files else None
 
@@ -87,19 +92,26 @@ class Resources:
             self.embedded += 1
         return self._uri[key]
 
-    def css_text(self, text: str, base_dir: str) -> str:
-        """Inline every url(...) of a stylesheet as a data: URI."""
+    def css_text(self, text: str, base_dir: str, _seen: frozenset = frozenset()) -> str:
+        """Inline @import-ed stylesheets and every url(...) as a data: URI."""
+        def imp(m):
+            key = self.find(m.group(2), base_dir)
+            if key is None or key in _seen:
+                return ""  # another CHM, missing, or an import loop
+            inner = re.sub(r"(?is)@charset[^;]*;", "", chm2md.read_text(self.data.files[key]))
+            return self.css_text(inner, posixpath.dirname(key), _seen | {key})
+
         def repl(m):
             uri = self.data_uri(m.group(2), base_dir)
             return f'url("{uri}")' if uri else m.group(0)
-        return URL_IN_CSS.sub(repl, text)
+        return URL_IN_CSS.sub(repl, CSS_IMPORT.sub(imp, text))
 
     def stylesheet(self, key: str) -> str:
         if key not in self._css:
             path = self.data.files[key]
             text = chm2md.read_text(path)
             text = re.sub(r"(?is)@charset[^;]*;", "", text)
-            self._css[key] = self.css_text(text, posixpath.dirname(key))
+            self._css[key] = self.css_text(text, posixpath.dirname(key), frozenset({key}))
         return self._css[key]
 
 
@@ -129,7 +141,7 @@ class PageRewriter(HTMLParser):
     """Re-serialises one page, rewriting what a browser outside CHM cannot load."""
 
     def __init__(self, rel: str, res: Resources, names: dict[str, str], nav: str):
-        super().__init__(convert_charrefs=False)
+        super().__init__(convert_charrefs=True)
         self.rel = rel
         self.dir = posixpath.dirname(rel)
         self.out_dir = posixpath.dirname(names[rel])
@@ -155,7 +167,7 @@ class PageRewriter(HTMLParser):
         if key is None or key not in self.res.data.pages:
             return None
         target = self.names[self.res.data.pages[key].relative_to(self.res.data.raw).as_posix()]
-        return posixpath.relpath(target, self.out_dir or ".") + anchor
+        return quote(posixpath.relpath(target, self.out_dir or ".")) + anchor
 
     def _href(self, href: str) -> tuple[str | None, bool]:
         """(new href or None to remove the attribute, drop the whole element)."""
@@ -249,7 +261,10 @@ class PageRewriter(HTMLParser):
         if self._skip:
             if tag == self._skip[-1]:
                 self._skip.pop()
-            return
+                return
+            if tag not in ("body", "html"):
+                return
+            self._skip.clear()  # an element dropped but never closed: stop dropping here
         if tag in DROP_TAGS:
             return
         if tag == "style" and self._in_style:
@@ -259,17 +274,12 @@ class PageRewriter(HTMLParser):
     def handle_data(self, data):
         if self._skip:
             return
-        if self._in_style:
-            data = self.res.css_text(data, self.dir)
-        self.out.append(data)
-
-    def handle_entityref(self, name):
-        if not self._skip:
-            self.out.append(f"&{name};")
-
-    def handle_charref(self, name):
-        if not self._skip:
-            self.out.append(f"&#{name};")
+        if self._in_style:  # raw CSS: the parser does not decode it
+            self.out.append(self.res.css_text(data, self.dir))
+            return
+        # the parser decoded the entities (convert_charrefs); write them back so that a
+        # bare "R&D" stays "R&amp;D" instead of becoming the unknown entity "&D;"
+        self.out.append(html.escape(data, quote=False).replace("\xa0", "&nbsp;"))
 
     def handle_comment(self, data):
         if not self._skip:
@@ -288,10 +298,12 @@ class PageRewriter(HTMLParser):
 
     def result(self) -> str:
         text = "".join(self.out)
-        if not self._charset_done:
-            text = '<meta charset="utf-8">\n' + text
-        if not self._nav_done and self.nav:
-            text = self.nav + text
+        add = ("" if self._charset_done else '<meta charset="utf-8">\n') + \
+              ("" if self._nav_done or not self.nav else self.nav + "\n")
+        if add:  # no <head>/<body>: put it after <html> (or <!DOCTYPE>), never before
+            m = (re.search(r"(?i)<html\b[^>]*>", text) or re.search(r"(?i)<!doctype[^>]*>", text))
+            pos = m.end() if m else 0
+            text = text[:pos] + ("\n" if pos else "") + add + text[pos:]
         return text
 
 
@@ -341,7 +353,7 @@ def write_html(data: chm2md.HelpData, out: Path, title: str, own_chm: str | None
         sizes[rel] = dst.stat().st_size
 
     def link(rel: str, label: str) -> str:
-        return f'<a href="pages/{html.escape(names[rel])}">{html.escape(label)}</a>'
+        return f'<a href="pages/{html.escape(quote(names[rel]))}">{html.escape(label)}</a>'
 
     body = [f"<h1>{html.escape(title)} ヘルプ 目次</h1>"]
 

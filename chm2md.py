@@ -643,13 +643,27 @@ def _write_skill(out: Path, name: str, title: str, chm: Path, stats: dict, has_k
                    encoding="utf-8", newline="\n")
 
 
+def downloads_dir() -> Path:
+    """The user's Downloads folder, following a relocation done in Explorer."""
+    try:
+        import winreg  # noqa: PLC0415  (Windows only)
+        key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            value, _ = winreg.QueryValueEx(k, "{374DE290-123F-4565-9164-39C4925E467B}")
+        import os  # noqa: PLC0415
+        return Path(os.path.expandvars(value))
+    except (ImportError, OSError):
+        return Path.home() / "Downloads"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Convert CHM help into a Markdown skill folder or self-contained HTML pages")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--chm", type=Path, help="CHM file to convert")
     src.add_argument("--src-dir", type=Path, help="folder of plain help pages (not a CHM)")
-    ap.add_argument("--out", required=True, type=Path, help="folder to write")
+    ap.add_argument("--out", type=Path,
+                    help="folder to write (default: Downloads\\<CHM or folder name>-<format>)")
     ap.add_argument("--format", choices=("md", "html"), default="md",
                     help="md = Markdown skill folder (default), html = one self-contained "
                          "HTML file per page (UTF-8 with BOM)")
@@ -669,6 +683,9 @@ def main(argv=None) -> int:
     cmap = dict(DEFAULT_CLASS_MAP)
     if args.class_map:
         cmap.update(json.loads(args.class_map.read_text(encoding="utf-8")))
+    if args.out is None:
+        stem = args.chm.stem if args.chm else args.src_dir.resolve().name
+        args.out = downloads_dir() / f"{stem}-{args.format}"
     args.out.mkdir(parents=True, exist_ok=True)
     if args.chm:
         stats = build(args.chm, args.out, args.name, args.title, args.with_images, cmap,
@@ -676,7 +693,8 @@ def main(argv=None) -> int:
     else:
         stats = build_from_dir(args.src_dir, args.out, args.name, args.title,
                                args.with_images, cmap, args.format)
-    sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps({"out": str(args.out.resolve()), **stats}, ensure_ascii=False))
     return 0
 

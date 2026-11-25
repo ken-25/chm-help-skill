@@ -12,7 +12,7 @@
 param(
     [string] $Chm,
     [string] $SrcDir,
-    [Parameter(Mandatory)] [string] $Out,
+    [string] $Out,
     [ValidateSet('md', 'html')] [string] $Format = 'md',
     [string] $Name,
     [Parameter(Mandatory)] [string] $Title,
@@ -22,7 +22,8 @@ param(
 $ErrorActionPreference = 'Stop'
 if ([bool]$Chm -eq [bool]$SrcDir) { throw 'Give exactly one of -Chm or -SrcDir.' }
 $argsList = @('run', '--project', $PSScriptRoot, 'python', (Join-Path $PSScriptRoot 'chm2md.py'),
-              '--out', $Out, '--format', $Format, '--title', $Title)
+              '--format', $Format, '--title', $Title)
+if ($Out)        { $argsList += @('--out', $Out) }
 if ($Chm)        { $argsList += @('--chm', $Chm) }
 if ($SrcDir)     { $argsList += @('--src-dir', $SrcDir) }
 if ($Name)       { $argsList += @('--name', $Name) }
