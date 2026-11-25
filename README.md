@@ -2,6 +2,8 @@
 
 Windows の CHM ヘルプファイル(`.chm`)を、AI エージェント向けの Markdown スキルフォルダに変換するツールです。目次(`.hhc`)と索引(`.hhk`)を保ったまま、ページを 1 ファイルずつ Markdown にします。
 
+`--format html` を付けると、ページごとに CSS と画像を埋め込んだ単独の HTML ファイル(UTF-8 BOM 付き)を作ります。単一の HTML ファイルなら取り込める他のシステムに渡すための形式です。
+
 ## 必要なもの
 
 - Windows(CHM の展開に `hh.exe` を使います)
@@ -30,15 +32,17 @@ python chm2md.py --chm "C:\Program Files\Example\Help\example.chm" `
 
 | オプション | 説明 |
 |---|---|
-| `--chm` | 変換する CHM ファイル(必須) |
-| `--out` | 出力先のスキルフォルダ(必須) |
-| `--name` | スキル名。`SKILL.md` の `name` になる(必須) |
-| `--title` | ソフトウェア名。`SKILL.md` の説明文に使う(必須) |
-| `--with-images` | ページが参照する画像もコピーする |
-| `--class-map` | CSS クラス → Markdown の対応表(JSON)。既定の対応表に上書きマージする |
+| `--chm` | 変換する CHM ファイル。`--src-dir` とどちらか一方が必須 |
+| `--src-dir` | CHM ではなく、HTML のままフォルダに置かれたヘルプページを変換する |
+| `--out` | 出力先のフォルダ(必須) |
+| `--format` | `md`(既定。Markdown スキルフォルダ)か `html`(1 ページ 1 ファイルの HTML) |
+| `--name` | スキル名。`SKILL.md` の `name` になる(`md` のとき必須) |
+| `--title` | ソフトウェア名。`SKILL.md` の説明文や目次の見出しに使う(必須) |
+| `--with-images` | `md` のとき、ページが参照する画像もコピーする(`html` は常に埋め込む) |
+| `--class-map` | `md` のとき使う CSS クラス → Markdown の対応表(JSON)。既定の対応表に上書きマージする |
 | `--keep-work` | 展開した一時ファイルを残す(調査用) |
 
-PowerShell 版では `-WithImages` / `-ClassMap` が対応します。
+PowerShell 版では `-SrcDir` / `-Format` / `-WithImages` / `-ClassMap` が対応します。
 
 ## 出力
 
@@ -53,6 +57,27 @@ OUT/
 
 - 再実行すると `pages/`・`index.md`・`keywords.md`・`SOURCE.md` を作り直します。手で編集した `SKILL.md` はそのまま残ります。
 - `SKILL.md` の雛形は `templates/SKILL.md.tmpl` です。
+
+### HTML 形式(`--format html`)
+
+```
+OUT/
+  SOURCE.md     出典(上と同じ。HTML の合計サイズと最大のページも書く)
+  index.html    目次
+  keywords.html 索引語(CHM に索引がある場合のみ)
+  pages/...     ヘルプ 1 ページにつき 1 つの HTML。CHM 内と同じ相対パスで、拡張子は .html
+```
+
+- 各ページは単独で開けます。CSS は `<style>` に、画像(CSS から参照される画像も含む)は `data:` URI として埋め込みます。
+- 文字コードは UTF-8(BOM 付き)で、`<meta charset="utf-8">` に書き換えます。
+- 本文は元のヘルプの HTML をそのまま使います。ブラウザで動かない部分は次のように扱います。
+  - スクリプトはすべて外します。折りたたみ表示は、最初から開いた状態になります。
+  - 用語のポップアップ(`javascript:fPopup(...)`)は、そのページへの普通のリンクにします。
+  - HTML Help 専用の部品(`<object>`)と、それを押す「関連項目」のリンクは外します。
+  - 同じ CHM 内へのリンク(`MS-ITS:...::/...` も含む)は、変換後のファイルへの相対リンクにします。別の CHM へのリンクは、リンクを外して文字だけ残します。
+  - 見つからない画像は `[図: ファイル名]` と表示します。
+- ページの先頭に、目次へのリンクと目次上の場所を 1 行足します。
+- Markdown 形式とは別のフォルダに出力してください(同じフォルダには書き込みません)。
 
 ## CSS クラスの対応表
 
