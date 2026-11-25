@@ -398,6 +398,7 @@ def write_html(data: chm2md.HelpData, out: Path, title: str, own_chm: str | None
                                  *kw_items, "</ul>"]), encoding=ENCODING, newline="\n")
     elif kw_path.exists():
         kw_path.unlink()
+    _write_markdown_index(data, out, title, names, titles, orphans)
 
     biggest = max(sizes, key=sizes.get) if sizes else ""
     return {
@@ -406,6 +407,48 @@ def write_html(data: chm2md.HelpData, out: Path, title: str, own_chm: str | None
         "images_missing": len(res.missing), "total_bytes": sum(sizes.values()),
         "largest_page": names.get(biggest, ""), "largest_bytes": sizes.get(biggest, 0),
     }
+
+
+def _write_markdown_index(data, out: Path, title: str, names: dict[str, str],
+                          titles: dict[str, str], orphans: list[str]) -> None:
+    """index.md / keywords.md for an AI to search, linking to the HTML pages."""
+    def target(rel: str) -> str:
+        return "pages/" + quote(names[rel])
+
+    lines = [chm2md.GENERATED_MARK, f"# {title} ヘルプ 目次", ""]
+
+    def toc(node, depth):
+        for ch in node["children"]:
+            rel = next((r for r in (data.resolve(l, data.hhc_dir) for l in ch["locals"]) if r),
+                       None)
+            label = ch["name"] or (titles.get(rel) if rel else "") or "(無題)"
+            lines.append("  " * depth + "- " + (f"[{label}]({target(rel)})" if rel else label))
+            toc(ch, depth + 1)
+
+    toc(data.toc, 0)
+    if orphans:
+        lines += ["", "## 目次にないページ", ""]
+        lines += [f"- [{titles[r]}]({target(r)})" for r in orphans]
+    (out / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+    kw_lines: list[str] = []
+
+    def kw(node, trail):
+        for ch in node["children"]:
+            words = trail + [ch["name"]]
+            targets = [r for r in (data.resolve(l, data.hhk_dir) for l in ch["locals"]) if r]
+            if targets:
+                links = ", ".join(f"[{titles.get(r, r)}]({target(r)})" for r in targets)
+                kw_lines.append(f"- {' / '.join(words)}: {links}")
+            kw(ch, words)
+
+    kw(data.kw, [])
+    kw_path = out / "keywords.md"
+    if kw_lines:
+        kw_path.write_text("\n".join([chm2md.GENERATED_MARK, f"# {title} ヘルプ 索引", ""]
+                                     + kw_lines) + "\n", encoding="utf-8", newline="\n")
+    elif kw_path.exists():
+        kw_path.unlink()
 
 
 def summary(stats: dict) -> str:

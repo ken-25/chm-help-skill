@@ -117,6 +117,11 @@ class HtmlTest(unittest.TestCase):
         self.assertIn("がめん: <a href=\"pages/Base/Main/a.html\">画面 説明</a>", kw)
         self.assertFalse((self.out / "SKILL.md").exists())
         self.assertIn("HTML", (self.out / "SOURCE.md").read_text(encoding="utf-8"))
+        md = (self.out / "index.md").read_text(encoding="utf-8")  # for an AI to search
+        self.assertIn("- 基本\n  - [画面](pages/Base/Main/a.html)", md)
+        self.assertIn("- [オブジェクト](pages/Base/Main/b.html)", md)
+        kwmd = (self.out / "keywords.md").read_text(encoding="utf-8")
+        self.assertIn("- がめん: [画面 説明](pages/Base/Main/a.html)", kwmd)
 
     def test_stats(self):
         self.assertEqual(self.stats["pages"], 2)

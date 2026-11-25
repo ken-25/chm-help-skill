@@ -372,10 +372,11 @@ def _check_out(out: Path, fmt: str) -> None:
     other format's folder (both formats rebuild OUT/pages)."""
     if not out.exists() or not any(out.iterdir()):
         return
-    is_md = (out / "SKILL.md").exists() or (out / "index.md").exists()
     idx = out / "index.html"
     is_html = idx.exists() and GENERATED_MARK in idx.read_text(encoding="utf-8-sig",
                                                                errors="replace")
+    # HTML output also writes index.md, so index.md alone means Markdown only without it
+    is_md = (out / "SKILL.md").exists() or ((out / "index.md").exists() and not is_html)
     if fmt == "html" and is_md:
         raise SystemExit(f"{out} holds a Markdown skill; write HTML to another folder")
     if fmt == "md" and is_html:
